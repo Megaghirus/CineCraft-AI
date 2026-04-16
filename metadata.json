@@ -1,0 +1,5 @@
+{
+  "name": "Cartoon Maker AI",
+  "description": "Create animated cartoon videos using Gemini and Veo models with a storyboard interface.",
+  "requestFramePermissions": []
+}

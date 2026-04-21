@@ -17,7 +17,9 @@
       "Bash(curl -s http://localhost:3000/api/config/status)",
       "Bash(curl -s http://localhost:3000/api/config/models)",
       "Bash(curl -s -X POST http://localhost:3000/api/gemini/generateContent -H \"Content-Type: application/json\" -d \"{\\\\\"model\\\\\":\\\\\"gemini-3.1-pro-preview\\\\\",\\\\\"contents\\\\\":\\\\\"Say OK\\\\\"}\")",
-      "Bash(curl -s -X POST http://localhost:3000/api/gemini/generateContent -H \"Content-Type: application/json\" -d \"{\\\\\"model\\\\\":\\\\\"gemini-3.1-pro-preview\\\\\",\\\\\"contents\\\\\":\\\\\"Return JSON: {\\\\\\\\\\\\\"scenes\\\\\\\\\\\\\":[{\\\\\\\\\\\\\"description\\\\\\\\\\\\\":\\\\\\\\\\\\\"test\\\\\\\\\\\\\"}]}\\\\\",\\\\\"config\\\\\":{\\\\\"responseMimeType\\\\\":\\\\\"application/json\\\\\"}}\")"
+      "Bash(curl -s -X POST http://localhost:3000/api/gemini/generateContent -H \"Content-Type: application/json\" -d \"{\\\\\"model\\\\\":\\\\\"gemini-3.1-pro-preview\\\\\",\\\\\"contents\\\\\":\\\\\"Return JSON: {\\\\\\\\\\\\\"scenes\\\\\\\\\\\\\":[{\\\\\\\\\\\\\"description\\\\\\\\\\\\\":\\\\\\\\\\\\\"test\\\\\\\\\\\\\"}]}\\\\\",\\\\\"config\\\\\":{\\\\\"responseMimeType\\\\\":\\\\\"application/json\\\\\"}}\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('streamlit_app.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('streamlit_app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")"
     ]
   }
 }

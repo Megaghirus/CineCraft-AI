@@ -13,14 +13,17 @@ dotenv.config();
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 // ── Directories ────────────────────────────────────────────────────────────────
-const TEMP_DIR    = path.join(process.cwd(), "temp");
+// Cloud Run has a read-only filesystem except /tmp
+const IS_PROD     = process.env.NODE_ENV === "production";
+const TEMP_DIR    = IS_PROD ? "/tmp/cinecraft"        : path.join(process.cwd(), "temp");
 const VIDEOS_DIR  = path.join(TEMP_DIR, "videos");
 const AUDIO_DIR   = path.join(TEMP_DIR, "audio");
 const OUTPUT_DIR  = path.join(TEMP_DIR, "output");
 [VIDEOS_DIR, AUDIO_DIR, OUTPUT_DIR].forEach(d => fs.mkdirSync(d, { recursive: true }));
 
 // ── Database ───────────────────────────────────────────────────────────────────
-const db = new Database("cinecraft.db");
+const DB_PATH = IS_PROD ? "/tmp/cinecraft.db" : "cinecraft.db";
+const db = new Database(DB_PATH);
 db.exec(`
   CREATE TABLE IF NOT EXISTS projects (
     id         TEXT PRIMARY KEY,
@@ -64,7 +67,7 @@ async function downloadToFile(url: string, destDir: string, ext: string, extraHe
 // ── Express app ────────────────────────────────────────────────────────────────
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || "8080", 10);
 
   app.use(express.json({ limit: "50mb" }));
 

@@ -8,6 +8,11 @@ build/
 .env.local
 *.log
 
+# Fișiere de test cu chei API
+test_*.ts
+test_*.js
+*.db
+
 # Fișiere specifice sistemului de operare sau editorului
 .DS_Store
 Thumbs.db

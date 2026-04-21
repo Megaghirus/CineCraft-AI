@@ -2,36 +2,27 @@ import { VideoProvider } from '../types';
 
 const ANTHRO_CONSTRAINT = "CRITICAL: All characters (even animals, aliens, or objects) MUST be highly anthropomorphic. They must stand on two legs, have human-like posture, wear human clothing, and exhibit human behavior, gestures, and facial expressions.";
 
-// ── Model cache ────────────────────────────────────────────────────────────────
-let _textModel:  string | null = null;
-let _videoModel: string | null = null;
+// ── Model cache (text model only — video model is per-scene) ──────────────────
+let _textModel: string | null = null;
 
-async function fetchModels() {
+async function fetchTextModel() {
   try {
     const res = await fetch('/api/config/models');
     if (!res.ok) throw new Error('fetch failed');
     const data = await res.json();
-    _textModel  = data.textModel  || 'gemini-2.5-flash';
-    _videoModel = data.videoModel || 'veo-3.1-generate-preview';
+    _textModel = data.textModel || 'gemini-2.5-flash';
   } catch {
-    _textModel  = _textModel  || 'gemini-2.5-flash';
-    _videoModel = _videoModel || 'veo-3.1-generate-preview';
+    _textModel = _textModel || 'gemini-2.5-flash';
   }
 }
 
 async function getTextModel(): Promise<string> {
-  if (!_textModel) await fetchModels();
+  if (!_textModel) await fetchTextModel();
   return _textModel!;
 }
 
-async function getVideoModel(): Promise<string> {
-  if (!_videoModel) await fetchModels();
-  return _videoModel!;
-}
-
 export function invalidateModelCache() {
-  _textModel  = null;
-  _videoModel = null;
+  _textModel = null;
 }
 
 // Tracked blob URLs for cleanup
@@ -209,23 +200,25 @@ export const getDirectorAdvice = async (sceneDesc: string, prompt: string, lang:
 // ── Video generation ───────────────────────────────────────────────────────────
 export const generateVideo = async (
   prompt: string,
-  provider: VideoProvider = 'gemini',
+  provider: VideoProvider = 'veo-3.1-generate-preview',
   onProgress?: (status: string) => void
 ): Promise<string> => {
-  if (provider === 'gemini') {
-    // Start generation
+  const isVeo = provider === 'veo-3.1-generate-preview' || provider === 'veo-2.0-generate-001';
+  if (isVeo) {
+    const veoLabel = provider === 'veo-3.1-generate-preview' ? 'Veo 3.1' : 'Veo 2.0';
+
+    // Start generation — pass the exact model name from provider
     let operation = await withRetry(() =>
-      getVideoModel().then(videoModel =>
       post('/api/gemini/generateVideos', {
-        model: videoModel,
+        model: provider,
         prompt,
         config: { numberOfVideos: 1, resolution: '1080p', aspectRatio: '16:9', generateAudio: false },
-      }))
+      })
     );
 
     // Poll until done
     while (!operation.done) {
-      onProgress?.('Generating video with Veo 3... please wait.');
+      onProgress?.(`Generating video with ${veoLabel}... please wait.`);
       await new Promise(r => setTimeout(r, 10000));
       operation = await withRetry(() =>
         post('/api/gemini/getVideosOperation', { operation })
@@ -241,7 +234,7 @@ export const generateVideo = async (
     return data.url as string;
 
   } else {
-    // VideoGen providers (Sora 2, Kling 3, Seedance 2) — all proxied through server
+    // VideoGen providers (Kling 3, Sora 2, Seedance 2) — all proxied through server
     onProgress?.(`Submitting to ${provider} via VideoGen...`);
     const { taskId } = await post('/api/videogen/generate', { prompt, provider });
 

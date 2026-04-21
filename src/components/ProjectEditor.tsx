@@ -459,10 +459,15 @@ function ScenesTab({ project, onChange, lang }: Props) {
                     onChange={(e) => updateScene(scene.id, { provider: e.target.value as any })}
                     className="bg-zinc-950 border border-zinc-700 text-xs rounded px-2 py-0.5 text-zinc-300 outline-none focus:border-indigo-500"
                   >
-                    <option value="gemini">Google Veo 3</option>
-                    <option value="sora-2">Sora 2</option>
-                    <option value="kling-3">Kling 3</option>
-                    <option value="seedance-2">Seedance 2</option>
+                    <optgroup label="Google / Gemini">
+                      <option value="veo-3.1-generate-preview">Veo 3.1 — premium</option>
+                      <option value="veo-2.0-generate-001">Veo 2.0 — stabil</option>
+                    </optgroup>
+                    <optgroup label="VideoGen Gateway">
+                      <option value="kling-3">Kling 3</option>
+                      <option value="sora-2">Sora 2</option>
+                      <option value="seedance-2">Seedance 2</option>
+                    </optgroup>
                   </select>
                 </div>
                 <button onClick={() => removeScene(scene.id)} className="text-zinc-500 hover:text-red-400">

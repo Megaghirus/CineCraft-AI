@@ -1,5 +1,5 @@
 export type Language = 'en' | 'ro' | 'ru';
-export type VideoProvider = 'gemini' | 'sora-2' | 'kling-3' | 'seedance-2';
+export type VideoProvider = 'veo-3.1-generate-preview' | 'veo-2.0-generate-001' | 'kling-3' | 'sora-2' | 'seedance-2';
 
 export interface Actor {
   id: string;
@@ -61,7 +61,7 @@ export function migrateScene(s: Partial<Scene> & { status?: string }): Scene {
     description,
     dialogue,
     prompt: s.prompt || '',
-    provider: s.provider || 'gemini',
+    provider: (s.provider === 'gemini' ? 'veo-3.1-generate-preview' : s.provider) || 'veo-3.1-generate-preview',
     videoUrl: s.videoUrl,
     videoStatus: (s as any).status === 'done' ? 'done'
       : (s as any).status === 'error' ? 'error'

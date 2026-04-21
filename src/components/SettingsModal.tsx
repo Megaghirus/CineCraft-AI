@@ -1,8 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Key, Save, CheckCircle2, Loader2, AlertCircle } from 'lucide-react';
-import { Language, VideoProvider } from '../types';
+import { X, Key, Save, CheckCircle2, Loader2, AlertCircle, Cpu } from 'lucide-react';
+import { Language } from '../types';
 import { translations } from '../i18n';
+
+const TEXT_MODELS = [
+  { id: 'gemini-2.5-pro-preview-05-06', label: 'Gemini 2.5 Pro — cel mai capabil (💰💰💰)' },
+  { id: 'gemini-2.5-flash-preview-05-20', label: 'Gemini 2.5 Flash — rapid, calitate bună (💰💰)' },
+  { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash — recomandat, ieftin (💰)' },
+  { id: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash — buget minim (💰)' },
+];
+
+const VIDEO_MODELS = [
+  { id: 'veo-3.1-generate-preview', label: 'Veo 3.1 — cel mai nou, premium (💰💰💰)' },
+  { id: 'veo-2.0-generate-001', label: 'Veo 2.0 — stabil, mai ieftin (💰💰)' },
+];
 
 interface Props {
   isOpen: boolean;
@@ -10,131 +22,241 @@ interface Props {
   lang: Language;
 }
 
+interface KeyStatus {
+  configured: boolean;
+  checking: boolean;
+  error?: string;
+}
+
+const PROVIDERS = [
+  { id: 'gemini',     name: 'Google Gemini / Veo 3',    descKey: 'geminiDesc'     },
+  { id: 'elevenlabs', name: 'ElevenLabs (TTS)',          descKey: 'elevenLabsDesc' },
+  { id: 'synclabs',   name: 'Sync.Labs (Lip-Sync)',      descKey: 'syncLabsDesc'   },
+  { id: 'videogen',   name: 'VideoGen Gateway',          descKey: 'videoGenDesc'   },
+];
+
 export function SettingsModal({ isOpen, onClose, lang }: Props) {
   const t = translations[lang];
-  const [keys, setKeys] = useState<Record<string, string>>({});
-  const [saved, setSaved] = useState(false);
-  const [verifying, setVerifying] = useState<string | null>(null);
-  const [verifyStatus, setVerifyStatus] = useState<Record<string, 'success' | 'error'>>({});
+  const [keys, setKeys]           = useState<Record<string, string>>({});
+  const [statuses, setStatuses]   = useState<Record<string, KeyStatus>>({});
+  const [saving, setSaving]       = useState(false);
+  const [saved, setSaved]         = useState(false);
+  const [models, setModels]       = useState({ textModel: 'gemini-2.0-flash', videoModel: 'veo-3.1-generate-preview' });
 
+  // Load current server-side key status and models on open
   useEffect(() => {
-    const stored = localStorage.getItem('other_ai_keys');
-    if (stored) {
-      setKeys(JSON.parse(stored));
-    }
+    if (!isOpen) return;
+    fetch('/api/config/status')
+      .then(r => r.json())
+      .then((data: Record<string, boolean>) => {
+        const s: Record<string, KeyStatus> = {};
+        for (const [k, v] of Object.entries(data)) {
+          s[k] = { configured: v, checking: false };
+        }
+        setStatuses(s);
+      })
+      .catch(() => {});
+    fetch('/api/config/models')
+      .then(r => r.json())
+      .then(data => setModels(data))
+      .catch(() => {});
+    setKeys({});
+    setSaved(false);
   }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const providers: { id: string; name: string; desc: string }[] = [
-    { id: 'gemini', name: 'Google Gemini', desc: 'Gemini API Key (Veo, AI Director)' },
-    { id: 'luma', name: 'Luma Dream Machine', desc: 'Luma AI API Key' },
-    { id: 'pika', name: 'Pika Art', desc: 'Pika Labs API Key' },
-    { id: 'kling', name: 'Kling AI', desc: 'Kuaishou Kling API Key' },
-    { id: 'runway', name: 'Runway Gen-3', desc: 'RunwayML API Key' },
-    { id: 'sora-2', name: 'Sora 2', desc: 'OpenAI Sora API Key' },
-  ];
-
-  const handleSave = () => {
-    localStorage.setItem('other_ai_keys', JSON.stringify(keys));
-    setSaved(true);
-    setTimeout(() => {
-      setSaved(false);
-      onClose();
-    }, 500);
-  };
-
   const handleVerify = async (providerId: string) => {
     const key = keys[providerId];
-    if (!key) return;
+    if (!key?.trim()) return;
 
-    setVerifying(providerId);
-    setVerifyStatus(prev => ({ ...prev, [providerId]: undefined as any }));
+    setStatuses(prev => ({ ...prev, [providerId]: { configured: false, checking: true } }));
 
     try {
-      // Simulate API verification delay
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      // In a real app, we would make a test API call here
-      // For now, we'll just check if it looks like a valid key format (length > 10)
-      if (key.length > 10) {
-        setVerifyStatus(prev => ({ ...prev, [providerId]: 'success' }));
-      } else {
-        setVerifyStatus(prev => ({ ...prev, [providerId]: 'error' }));
+      // Send key to server and check status
+      await fetch('/api/config/set-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service: providerId, key: key.trim() }),
+      });
+
+      const statusRes = await fetch('/api/config/status');
+      const data = await statusRes.json();
+
+      setStatuses(prev => ({
+        ...prev,
+        [providerId]: { configured: data[providerId] ?? false, checking: false },
+      }));
+    } catch (err: any) {
+      setStatuses(prev => ({
+        ...prev,
+        [providerId]: { configured: false, checking: false, error: err.message },
+      }));
+    }
+  };
+
+  const handleSaveAll = async () => {
+    setSaving(true);
+    try {
+      for (const [service, key] of Object.entries(keys)) {
+        if (key?.trim()) {
+          await fetch('/api/config/set-key', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ service, key: key.trim() }),
+          });
+        }
       }
-    } catch (e) {
-      setVerifyStatus(prev => ({ ...prev, [providerId]: 'error' }));
+      await fetch('/api/config/set-model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(models),
+      });
+      // Refresh statuses
+      const statusRes = await fetch('/api/config/status');
+      const data = await statusRes.json();
+      const s: Record<string, KeyStatus> = {};
+      for (const [k, v] of Object.entries(data)) {
+        s[k] = { configured: v as boolean, checking: false };
+      }
+      setStatuses(s);
+      setKeys({});
+      setSaved(true);
+      setTimeout(() => { setSaved(false); onClose(); }, 800);
+    } catch (err: any) {
+      alert(`Error saving keys: ${err.message}`);
     } finally {
-      setVerifying(null);
+      setSaving(false);
     }
   };
 
   return createPortal(
     <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      
+
       <div className="relative w-full max-w-2xl bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+        {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-zinc-800 shrink-0">
           <h2 className="text-xl font-bold text-white flex items-center gap-2">
             <Key size={20} className="text-indigo-400" />
-            {t.settings || 'Settings'}
+            {t.settings}
           </h2>
           <button onClick={onClose} className="text-zinc-500 hover:text-white transition-colors">
             <X size={20} />
           </button>
         </div>
 
-        <div className="p-6 overflow-y-auto flex-1 space-y-6">
-          <p className="text-zinc-400 text-sm">
-            {t.settingsDesc || 'Configure your API keys for various AI video generation models. Keys are stored locally in your browser.'}
-          </p>
+        {/* Body */}
+        <div className="p-6 overflow-y-auto flex-1 space-y-4">
+          <p className="text-zinc-400 text-sm">{t.settingsDesc}</p>
 
-          <div className="space-y-6">
-            {providers.map(provider => (
-              <div key={provider.id} className="space-y-2 bg-zinc-900/50 p-4 rounded-xl border border-zinc-800/50">
-                <div className="flex justify-between items-center">
-                  <label className="text-sm font-medium text-zinc-200">{provider.name}</label>
-                  <span className="text-xs text-zinc-500">{provider.desc}</span>
+          {/* AI Model Selector */}
+          <div className="bg-zinc-900/50 border border-indigo-500/30 rounded-xl p-4 space-y-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-indigo-300">
+              <Cpu size={16} />
+              {(t as any).modelSettings || 'AI Model Selection'}
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="space-y-1">
+                <label className="text-xs text-zinc-400">{(t as any).textModelLabel || 'Text Model (Story / Scenes)'}</label>
+                <select
+                  value={models.textModel}
+                  onChange={e => setModels(prev => ({ ...prev, textModel: e.target.value }))}
+                  className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-indigo-500 transition-colors"
+                >
+                  {TEXT_MODELS.map(m => (
+                    <option key={m.id} value={m.id}>{m.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-zinc-400">{(t as any).videoModelLabel || 'Video Model (Veo)'}</label>
+                <select
+                  value={models.videoModel}
+                  onChange={e => setModels(prev => ({ ...prev, videoModel: e.target.value }))}
+                  className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-indigo-500 transition-colors"
+                >
+                  {VIDEO_MODELS.map(m => (
+                    <option key={m.id} value={m.id}>{m.label}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {PROVIDERS.map(provider => {
+            const status = statuses[provider.id];
+            const desc = (t as any)[provider.descKey] || '';
+            return (
+              <div key={provider.id} className="bg-zinc-900/50 border border-zinc-800/50 rounded-xl p-4 space-y-2">
+                <div className="flex justify-between items-start">
+                  <div>
+                    <span className="text-sm font-semibold text-zinc-200">{provider.name}</span>
+                    <p className="text-xs text-zinc-500 mt-0.5">{desc}</p>
+                  </div>
+                  {status?.configured && !keys[provider.id] && (
+                    <span className="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full shrink-0">
+                      {t.verified}
+                    </span>
+                  )}
                 </div>
+
                 <div className="flex gap-2">
                   <input
                     type="password"
                     value={keys[provider.id] || ''}
                     onChange={(e) => {
-                      setKeys({ ...keys, [provider.id]: e.target.value });
-                      setVerifyStatus(prev => ({ ...prev, [provider.id]: undefined as any }));
+                      setKeys(prev => ({ ...prev, [provider.id]: e.target.value }));
+                      setStatuses(prev => ({ ...prev, [provider.id]: { ...prev[provider.id], error: undefined } as KeyStatus }));
                     }}
-                    placeholder={`Enter ${provider.name} API Key...`}
+                    placeholder={status?.configured ? '••••••••••••• (already configured)' : `Enter ${provider.name} API Key...`}
                     className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-2 text-sm text-zinc-200 focus:outline-none focus:border-indigo-500 transition-colors"
                   />
                   <button
                     onClick={() => handleVerify(provider.id)}
-                    disabled={!keys[provider.id] || verifying === provider.id}
-                    className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed text-zinc-300 text-sm rounded-lg transition-colors flex items-center gap-2 min-w-[100px] justify-center"
+                    disabled={!keys[provider.id]?.trim() || status?.checking}
+                    className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed text-zinc-300 text-sm rounded-lg transition-colors flex items-center gap-2 min-w-[90px] justify-center"
                   >
-                    {verifying === provider.id ? (
+                    {status?.checking ? (
                       <Loader2 size={16} className="animate-spin" />
-                    ) : verifyStatus[provider.id] === 'success' ? (
-                      <><CheckCircle2 size={16} className="text-emerald-400" /> {t.verified || 'Verified'}</>
-                    ) : verifyStatus[provider.id] === 'error' ? (
-                      <><AlertCircle size={16} className="text-red-400" /> {t.failed || 'Failed'}</>
+                    ) : status?.configured && keys[provider.id] ? (
+                      <><CheckCircle2 size={15} className="text-emerald-400" /> OK</>
                     ) : (
-                      t.verify || 'Verify'
+                      t.verify
                     )}
                   </button>
                 </div>
+
+                {status?.error && (
+                  <p className="text-xs text-red-400 flex items-center gap-1">
+                    <AlertCircle size={12} /> {status.error}
+                  </p>
+                )}
               </div>
-            ))}
+            );
+          })}
+
+          {/* Sync.Labs note */}
+          <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-3 text-xs text-amber-200/80">
+            ⚠️ {t.lipsyncWarning}
           </div>
         </div>
 
-        <div className="p-6 border-t border-zinc-800 shrink-0 bg-zinc-950 flex justify-end">
+        {/* Footer */}
+        <div className="p-6 border-t border-zinc-800 shrink-0 flex justify-end">
           <button
-            onClick={handleSave}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-6 rounded-lg transition-all flex items-center gap-2"
+            onClick={handleSaveAll}
+            disabled={saving}
+            className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white font-medium py-2 px-6 rounded-lg transition-all flex items-center gap-2"
           >
-            {saved ? <CheckCircle2 size={18} className="text-emerald-400" /> : <Save size={18} />}
-            {saved ? (t.saved || 'Saved!') : (t.saveKeys || 'Save Keys')}
+            {saving ? (
+              <Loader2 size={18} className="animate-spin" />
+            ) : saved ? (
+              <CheckCircle2 size={18} className="text-emerald-400" />
+            ) : (
+              <Save size={18} />
+            )}
+            {saved ? t.saved : t.saveKeys}
           </button>
         </div>
       </div>

@@ -1,13 +1,13 @@
-import React, { useState, useEffect } from 'react';
-import { Project, Language } from './types';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Project, Language, migrateScene } from './types';
 import { translations } from './i18n';
-import { ApiKeyScreen } from './components/ApiKeyScreen';
 import { RightSidebar } from './components/RightSidebar';
 import { ProjectEditor } from './components/ProjectEditor';
-import { Languages, Film, Sparkles, Settings, Trash2 } from 'lucide-react';
+import { Languages, Film, Settings, Trash2 } from 'lucide-react';
 import { Logo } from './components/Logo';
 import { Manifesto } from './components/Manifesto';
 import { SettingsModal } from './components/SettingsModal';
+import { invalidateModelCache } from './services/gemini';
 
 export default function App() {
   const [hasKey, setHasKey] = useState(false);
@@ -16,34 +16,85 @@ export default function App() {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [showManifesto, setShowManifesto] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    // We have a hardcoded fallback key, so we always have a key
-    setHasKey(true);
+  // Migrate old project format (separated dialogue from description)
+  const migrateProject = (p: Project): Project => ({
+    ...p,
+    scenes: p.scenes.map(migrateScene),
+  });
 
-    // Load projects from local storage
+  // Load projects from server SQLite DB; fall back to localStorage for migration
+  const loadProjects = useCallback(async () => {
+    try {
+      const res = await fetch('/api/projects');
+      if (res.ok) {
+        const data: Project[] = await res.json();
+        if (data.length > 0) {
+          const migrated = data.map(migrateProject);
+          setProjects(migrated);
+          setActiveProjectId(migrated[0].id);
+          return;
+        }
+      }
+    } catch { /* server not ready yet */ }
+
+    // Migrate from localStorage on first run
     const saved = localStorage.getItem('cartoon_projects');
     if (saved) {
       try {
-        const parsed = JSON.parse(saved);
-        setProjects(parsed);
-        if (parsed.length > 0) setActiveProjectId(parsed[0].id);
-      } catch (e) {
-        console.error('Failed to load projects', e);
-      }
-    }
-
-    // Show manifesto on load if not seen
-    const hasSeenManifesto = localStorage.getItem('has_seen_manifesto');
-    if (!hasSeenManifesto) {
-      setShowManifesto(true);
-      localStorage.setItem('has_seen_manifesto', 'true');
+        const parsed: Project[] = JSON.parse(saved);
+        const migrated = parsed.map(migrateProject);
+        setProjects(migrated);
+        if (migrated.length > 0) setActiveProjectId(migrated[0].id);
+        // Persist to server
+        for (const p of migrated) {
+          await fetch('/api/projects', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(p),
+          }).catch(() => {});
+        }
+      } catch { /* ignore parse errors */ }
     }
   }, []);
 
+  useEffect(() => {
+    const init = async () => {
+      // Check server for API key configuration
+      try {
+        const res = await fetch('/api/config/status');
+        if (res.ok) {
+          const status = await res.json();
+          setHasKey(status.gemini);
+        }
+      } catch {
+        setHasKey(false);
+      }
+
+      await loadProjects();
+
+      const hasSeenManifesto = localStorage.getItem('has_seen_manifesto');
+      if (!hasSeenManifesto) {
+        setShowManifesto(true);
+        localStorage.setItem('has_seen_manifesto', 'true');
+      }
+
+      setLoading(false);
+    };
+    init();
+  }, [loadProjects]);
+
+  const persistProject = async (project: Project) => {
+    await fetch('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(project),
+    }).catch(console.error);
+  };
+
   const saveProjects = (newProjects: Project[]) => {
     setProjects(newProjects);
-    localStorage.setItem('cartoon_projects', JSON.stringify(newProjects));
   };
 
   const handleCreateProject = () => {
@@ -53,52 +104,64 @@ export default function App() {
       story: '',
       actors: [],
       scenes: [],
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     };
     saveProjects([newProject, ...projects]);
     setActiveProjectId(newProject.id);
+    persistProject(newProject);
   };
 
   const handleUpdateProject = (updated: Project) => {
     updated.updatedAt = Date.now();
     saveProjects(projects.map(p => p.id === updated.id ? updated : p));
+    persistProject(updated);
   };
 
-  const handleDeleteProject = (id: string) => {
+  const handleDeleteProject = async (id: string) => {
     const newProjects = projects.filter(p => p.id !== id);
     saveProjects(newProjects);
     if (activeProjectId === id) {
       setActiveProjectId(newProjects.length > 0 ? newProjects[0].id : null);
     }
+    await fetch(`/api/projects/${id}`, { method: 'DELETE' }).catch(console.error);
   };
 
-  if (!hasKey) {
-    return <ApiKeyScreen lang={lang} onKeySelected={() => setHasKey(true)} />;
+  const t = translations[lang];
+
+  if (loading) {
+    return (
+      <div className="flex h-screen bg-zinc-950 items-center justify-center">
+        <div className="text-zinc-500 text-sm animate-pulse">Loading CineCraft AI...</div>
+      </div>
+    );
   }
 
   const activeProject = projects.find(p => p.id === activeProjectId);
-  const t = translations[lang];
 
   return (
     <div className="flex h-screen bg-zinc-950 text-zinc-200 font-sans overflow-hidden">
-      {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Topbar */}
         <header className="h-14 border-b border-zinc-800 bg-zinc-900 flex items-center justify-between px-6 shrink-0">
-          <div className="flex items-center gap-2" onClick={() => setShowManifesto(true)}>
+          <div className="flex items-center gap-2 cursor-pointer" onClick={() => setShowManifesto(true)}>
             <Logo />
           </div>
-          
+
           <div className="flex items-center gap-4">
+            {!hasKey && (
+              <span className="text-amber-400 text-xs bg-amber-400/10 border border-amber-400/20 px-3 py-1 rounded-full">
+                ⚠️ Gemini key not configured — open Settings
+              </span>
+            )}
             <button
               onClick={() => {
-                if (window.confirm('Ești sigur că vrei să ștergi memoria cache? Toate proiectele și setările vor fi șterse definitiv.')) {
+                if (window.confirm('Ești sigur că vrei să ștergi memoria cache? Proiectele rămân pe server.')) {
                   localStorage.clear();
                   window.location.reload();
                 }
               }}
               className="text-red-400 hover:text-red-300 transition-colors p-2 rounded-lg hover:bg-red-900/20 flex items-center gap-2 text-sm font-medium"
-              title="Șterge Cache (Resetare Aplicație)"
+              title="Șterge Cache Local"
             >
               <Trash2 size={18} />
               <span className="hidden sm:inline">Șterge Cache</span>
@@ -106,14 +169,14 @@ export default function App() {
             <button
               onClick={() => setShowSettings(true)}
               className="text-zinc-400 hover:text-white transition-colors p-2 rounded-lg hover:bg-zinc-800"
-              title={t.settings || 'Settings'}
+              title={t.settings}
             >
               <Settings size={20} />
             </button>
             <div className="flex items-center gap-2 border-l border-zinc-800 pl-4">
               <Languages size={16} className="text-zinc-500" />
-              <select 
-                value={lang} 
+              <select
+                value={lang}
                 onChange={(e) => setLang(e.target.value as Language)}
                 className="bg-zinc-800 border border-zinc-700 text-sm rounded-md px-2 py-1 outline-none focus:border-indigo-500"
               >
@@ -128,16 +191,16 @@ export default function App() {
         {/* Editor */}
         <main className="flex-1 overflow-hidden">
           {activeProject ? (
-            <ProjectEditor 
-              project={activeProject} 
-              onChange={handleUpdateProject} 
-              lang={lang} 
+            <ProjectEditor
+              project={activeProject}
+              onChange={handleUpdateProject}
+              lang={lang}
             />
           ) : (
             <div className="h-full flex flex-col items-center justify-center text-zinc-500">
               <Film size={48} className="mb-4 opacity-20" />
-              <p>Select a project or create a new one</p>
-              <button 
+              <p>Selectează un proiect sau creează unul nou</p>
+              <button
                 onClick={handleCreateProject}
                 className="mt-4 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg transition-colors"
               >
@@ -148,8 +211,7 @@ export default function App() {
         </main>
       </div>
 
-      {/* Right Sidebar - Projects */}
-      <RightSidebar 
+      <RightSidebar
         projects={projects}
         activeId={activeProjectId}
         onSelect={setActiveProjectId}
@@ -159,7 +221,15 @@ export default function App() {
       />
 
       <Manifesto isOpen={showManifesto} onClose={() => setShowManifesto(false)} lang={lang} />
-      <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} lang={lang} />
+      <SettingsModal
+        isOpen={showSettings}
+        onClose={() => {
+          setShowSettings(false);
+          invalidateModelCache();
+          fetch('/api/config/status').then(r => r.json()).then(s => setHasKey(s.gemini)).catch(() => {});
+        }}
+        lang={lang}
+      />
     </div>
   );
 }

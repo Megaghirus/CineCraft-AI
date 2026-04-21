@@ -2,48 +2,113 @@ import { VideoProvider } from '../types';
 
 const ANTHRO_CONSTRAINT = "CRITICAL: All characters (even animals, aliens, or objects) MUST be highly anthropomorphic. They must stand on two legs, have human-like posture, wear human clothing, and exhibit human behavior, gestures, and facial expressions.";
 
+// ── Model cache ────────────────────────────────────────────────────────────────
+let _textModel:  string | null = null;
+let _videoModel: string | null = null;
+
+async function fetchModels() {
+  try {
+    const res = await fetch('/api/config/models');
+    if (!res.ok) throw new Error('fetch failed');
+    const data = await res.json();
+    _textModel  = data.textModel  || 'gemini-2.0-flash';
+    _videoModel = data.videoModel || 'veo-3.1-generate-preview';
+  } catch {
+    _textModel  = _textModel  || 'gemini-2.0-flash';
+    _videoModel = _videoModel || 'veo-3.1-generate-preview';
+  }
+}
+
+async function getTextModel(): Promise<string> {
+  if (!_textModel) await fetchModels();
+  return _textModel!;
+}
+
+async function getVideoModel(): Promise<string> {
+  if (!_videoModel) await fetchModels();
+  return _videoModel!;
+}
+
+export function invalidateModelCache() {
+  _textModel  = null;
+  _videoModel = null;
+}
+
+// Tracked blob URLs for cleanup
+const trackedBlobUrls = new Set<string>();
+
+export function revokeBlobUrl(url: string) {
+  if (url.startsWith('blob:')) {
+    URL.revokeObjectURL(url);
+    trackedBlobUrls.delete(url);
+  }
+}
+
+// ── Retry helper ───────────────────────────────────────────────────────────────
 const withRetry = async <T>(operation: () => Promise<T>, maxRetries = 5, baseDelay = 2000): Promise<T> => {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       return await operation();
     } catch (error: any) {
-      const errorMessage = error?.message || '';
-      
       if (attempt === maxRetries) throw error;
-      
-      // Check if it's a 503 or 429 (RESOURCE_EXHAUSTED) error
-      const isTransient = error?.status === 503 || error?.status === 429 || errorMessage.includes('503') || errorMessage.includes('429') || errorMessage.includes('RESOURCE_EXHAUSTED');
-      
-      if (isTransient) {
-        const delay = baseDelay * Math.pow(2, attempt - 1);
-        console.warn(`API error (attempt ${attempt}/${maxRetries}). Retrying in ${delay}ms...`, error);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      } else {
-        throw error; // Don't retry non-transient errors
-      }
+      const isTransient =
+        error?.status === 503 || error?.status === 429 ||
+        String(error?.message).includes('503') ||
+        String(error?.message).includes('429') ||
+        String(error?.message).includes('RESOURCE_EXHAUSTED');
+      if (!isTransient) throw error;
+      const delay = baseDelay * Math.pow(2, attempt - 1);
+      console.warn(`API retry ${attempt}/${maxRetries} in ${delay}ms`, error?.message);
+      await new Promise(r => setTimeout(r, delay));
     }
   }
   throw new Error('Max retries reached');
 };
 
-const generateContent = async (model: string, contents: string, config?: any) => {
-  const response = await fetch("/api/gemini/generateContent", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ model, contents, config }),
+// ── Fetch helpers ─────────────────────────────────────────────────────────────
+const post = async (endpoint: string, body: unknown) => {
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `API Error: ${response.status}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(err.error || `API Error: ${res.status}`);
   }
-
-  return response.json();
+  return res.json();
 };
 
-export const enhanceStory = async (story: string, lang: string, animationStyle: string = '', dialogueLanguage: string = '') => {
+const get = async (endpoint: string) => {
+  const res = await fetch(endpoint);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(err.error || `API Error: ${res.status}`);
+  }
+  return res.json();
+};
+
+const generateContent = (model: string, contents: string, config?: any) =>
+  withRetry(() => post('/api/gemini/generateContent', { model, contents, config }));
+
+// ── Safe JSON parse ────────────────────────────────────────────────────────────
+function safeParseJSON<T>(text: string | null | undefined, fallback: T): T {
+  if (!text) return fallback;
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Gemini sometimes wraps JSON in markdown fences
+    const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (match) {
+      try { return JSON.parse(match[1]); } catch { /* fall through */ }
+    }
+    console.warn('Failed to parse JSON response:', text.slice(0, 200));
+    return fallback;
+  }
+}
+
+// ── Story enhancement ──────────────────────────────────────────────────────────
+export const enhanceStory = async (story: string, lang: string, animationStyle = '', dialogueLanguage = '') => {
   const prompt = `
     Take the following rough story idea and expand it into a detailed, engaging, and well-structured narrative for a cartoon.
     Make it highly descriptive, focusing on character motivations, setting the scene, and a clear plot progression (beginning, middle, climax, end).
@@ -51,238 +116,214 @@ export const enhanceStory = async (story: string, lang: string, animationStyle: 
     ${dialogueLanguage ? `CRITICAL: The spoken dialogue and cultural context within the story should be in ${dialogueLanguage}.` : ''}
     ${ANTHRO_CONSTRAINT}
     The output MUST be just the story text, written in the requested language.
-    
     Language: ${lang}
     Rough Idea: ${story}
   `;
-
-  const response = await withRetry(async () => {
-    return await generateContent('gemini-2.5-pro', prompt);
-  });
-
+  const response = await generateContent(await getTextModel(), prompt);
   return response.text || story;
 };
 
-export const generateActors = async (story: string, lang: string, animationStyle: string = '', dialogueLanguage: string = '') => {
+// ── Actors generation ─────────────────────────────────────────────────────────
+export const generateActors = async (story: string, lang: string, animationStyle = '', dialogueLanguage = '') => {
   const prompt = `
     Based on the following story, identify and generate a list of the main characters/actors.
-    For each actor, provide a name and a detailed description including their role in the story, appearance, and personality.
-    ${animationStyle ? `The intended animation style is: ${animationStyle}. Describe their appearance to fit this style.` : ''}
-    ${dialogueLanguage ? `The characters should have names and traits appropriate for a story spoken in ${dialogueLanguage}.` : ''}
+    For each actor, provide a name and a detailed description including their role, appearance, and personality.
+    ${animationStyle ? `Animation style: ${animationStyle}.` : ''}
+    ${dialogueLanguage ? `Characters should have names/traits appropriate for a story in ${dialogueLanguage}.` : ''}
     ${ANTHRO_CONSTRAINT}
-    
-    The output MUST be a valid JSON object with the structure:
-    {
-      "actors": [{ "name": "string", "description": "string" }]
-    }
-    
+    Output MUST be valid JSON: { "actors": [{ "name": "string", "description": "string" }] }
     Story: ${story}
     Language: ${lang}
   `;
-
-  const response = await withRetry(async () => {
-    return await generateContent('gemini-2.5-pro', prompt, {
-      responseMimeType: "application/json",
-    });
-  });
-
-  return JSON.parse(response.text || '{"actors": []}');
+  const response = await generateContent(await getTextModel(), prompt, { responseMimeType: 'application/json' });
+  return safeParseJSON<{ actors: any[] }>(response.text, { actors: [] });
 };
 
-export const generateScenes = async (story: string, actors: any[], lang: string, animationStyle: string = '', dialogueLanguage: string = '') => {
+// ── Scene generation ───────────────────────────────────────────────────────────
+export const generateScenes = async (story: string, actors: any[], lang: string, animationStyle = '', dialogueLanguage = '') => {
   const prompt = `
-    Based on the following story and actors, break the story down into a sequence of scenes.
-    For each scene, provide:
-    1. A description of the action.
-    2. The dialogue.
-    3. A highly detailed visual prompt for a video generation AI to create this specific scene.
-    
-    CRITICAL INSTRUCTIONS FOR DIALOGUE:
-    - ALL spoken dialogue MUST be written strictly in ${dialogueLanguage || `the language corresponding to the code '${lang}'`}. Do not mix languages.
+    Based on the following story and actors, break the story into a sequence of scenes.
+    For each scene provide:
+    1. description: the visual action (no dialogue).
+    2. dialogue: ALL spoken lines, strictly in ${dialogueLanguage || `the language for code '${lang}'`}. Do not mix languages.
+    3. prompt: a detailed English visual prompt for a video AI.
 
-    CRITICAL INSTRUCTIONS FOR THE VIDEO PROMPT:
-    - The prompt MUST be in English, regardless of the requested language for the story.
-    - ${animationStyle ? `Animation Style: ${animationStyle}. Include this style description prominently in the prompt.` : 'Animation Style: High quality 2D cartoon animation, masterpiece.'}
+    PROMPT RULES:
+    - Always in English.
+    - ${animationStyle ? `Animation Style: ${animationStyle}.` : 'Animation Style: High quality 2D cartoon animation, masterpiece.'}
     - ${ANTHRO_CONSTRAINT}
-    - Keep camera movement minimal or static to prevent background morphing.
-    - Describe characters' appearances very clearly and consistently based on the actors list.
-    - Focus on simple, deliberate, and slow actions.
-    - Describe lighting and atmosphere clearly.
-    - CRITICAL: Video generation models DO NOT generate speech or audio. DO NOT include dialogue in the visual prompt. Instead, describe the character "talking animatedly", "moving their mouth", or their facial expressions.
-    
-    The output MUST be a valid JSON object with the structure:
-    {
-      "scenes": [{ "description": "string", "dialogue": "string", "prompt": "string" }]
-    }
-    
+    - Keep camera movement minimal to prevent background morphing.
+    - Describe characters clearly and consistently.
+    - Focus on slow, deliberate actions.
+    - Do NOT include spoken dialogue in the visual prompt — describe mouth movement instead.
+
+    Output MUST be valid JSON: { "scenes": [{ "description": "string", "dialogue": "string", "prompt": "string" }] }
     Story: ${story}
     Actors: ${JSON.stringify(actors)}
-    Language for description and dialogue: ${lang}
+    Language for description/dialogue: ${lang}
   `;
-
-  const response = await withRetry(async () => {
-    return await generateContent('gemini-2.5-pro', prompt, {
-      responseMimeType: "application/json",
-    });
-  });
-
-  return JSON.parse(response.text || '{"scenes": []}');
+  const response = await generateContent(await getTextModel(), prompt, { responseMimeType: 'application/json' });
+  return safeParseJSON<{ scenes: any[] }>(response.text, { scenes: [] });
 };
 
-export const generateVideoPrompt = async (story: string, actors: any[], sceneDesc: string, lang: string, animationStyle: string = '') => {
+// ── Video prompt generation ────────────────────────────────────────────────────
+export const generateVideoPrompt = async (story: string, actors: any[], sceneDesc: string, lang: string, animationStyle = '') => {
   const prompt = `
-    Based on the following story and actors, write a detailed visual prompt for a video generation AI to create a specific scene.
-    The output should ONLY be the prompt text, nothing else. The prompt MUST be in English.
-    
-    CRITICAL INSTRUCTIONS FOR HIGH QUALITY AND CONSISTENCY:
-    1. ${animationStyle ? `Animation Style: ${animationStyle}. Include this style description prominently in the prompt.` : 'Animation Style: High quality 2D cartoon animation, masterpiece.'}
+    Write a detailed visual prompt for a video AI to create a specific cartoon scene.
+    Output ONLY the prompt text. The prompt MUST be in English.
+
+    RULES:
+    1. ${animationStyle ? `Animation Style: ${animationStyle}.` : 'Animation Style: High quality 2D cartoon animation, masterpiece.'}
     2. ${ANTHRO_CONSTRAINT}
-    3. Keep the camera movement minimal or static to prevent background morphing.
-    4. Describe the characters' appearances very clearly and consistently.
-    5. Focus on simple, deliberate, and slow actions to avoid unnatural AI physics.
-    6. Do not include complex interactions between multiple objects that might blend together.
-    7. Describe the lighting and atmosphere clearly.
-    8. If the scene involves dialogue, explicitly include the dialogue in quotes and specify the language (e.g., "saying in Romanian: 'Salut'"). This helps the video model generate matching lip movements and audio.
-    
+    3. Keep camera movement minimal or static.
+    4. Describe characters clearly and consistently.
+    5. Focus on simple, deliberate actions.
+    6. Describe lighting and atmosphere clearly.
+    7. If the scene has dialogue, include it in quotes with the language tag so the model can attempt lip-sync (e.g., saying in Romanian: "Bună ziua!").
+
     Story: ${story}
     Actors: ${JSON.stringify(actors)}
     Scene Description: ${sceneDesc}
     Language: ${lang}
   `;
-
-  const response = await withRetry(async () => {
-    return await generateContent('gemini-2.5-pro', prompt);
-  });
-
-  return response.text;
+  const response = await generateContent(await getTextModel(), prompt);
+  return response.text as string;
 };
 
+// ── Director advice ────────────────────────────────────────────────────────────
 export const getDirectorAdvice = async (sceneDesc: string, prompt: string, lang: string) => {
   const sysPrompt = `
-    You are an expert AI Video Director. Review the following scene description and video prompt.
-    Provide 3 short, actionable tips to improve the visual generation, avoid AI artifacts (like morphing), and make the scene look professional.
-    Remind the user to ensure the prompt includes the exact dialogue and language if they want the characters to speak, so the AI can attempt lip-syncing.
-    Output MUST be in the language corresponding to the code '${lang}'. Keep it concise, using bullet points.
-    
+    You are an expert AI Video Director. Review the scene description and video prompt.
+    Provide 3 short, actionable tips to improve visual generation, avoid AI artifacts (morphing), and make the scene look professional.
+    Remind the user: if they want synchronized voice, generate the audio first with ElevenLabs, then use Lip-Sync to merge.
+    Output in the language for code '${lang}'. Use bullet points. Keep it concise.
     Scene: ${sceneDesc}
     Prompt: ${prompt}
   `;
-
-  const response = await withRetry(async () => {
-    return await generateContent('gemini-2.5-pro', sysPrompt);
-  });
-
-  return response.text;
+  const response = await generateContent(await getTextModel(), sysPrompt);
+  return response.text as string;
 };
 
-const getVideoGenKey = () => {
-  return localStorage.getItem('videogen_api_key') || 'lannetech_cf0bcb4970daf91c3baac9b39ba595b77eb4a8fc423d1cfce50ca7fd64791783';
-};
-
-export const generateVideo = async (prompt: string, provider: VideoProvider = 'gemini', onProgress?: (status: string) => void) => {
+// ── Video generation ───────────────────────────────────────────────────────────
+export const generateVideo = async (
+  prompt: string,
+  provider: VideoProvider = 'gemini',
+  onProgress?: (status: string) => void
+): Promise<string> => {
   if (provider === 'gemini') {
-    let operation = await withRetry(async () => {
-      const res = await fetch("/api/gemini/generateVideos", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: 'veo-3.1-generate-preview',
-          prompt: prompt,
-          config: {
-            numberOfVideos: 1,
-            resolution: '1080p',
-            aspectRatio: '16:9'
-          }
-        })
-      });
-      if (!res.ok) throw new Error(await res.text());
-      return res.json();
-    });
+    // Start generation
+    let operation = await withRetry(() =>
+      getVideoModel().then(videoModel =>
+      post('/api/gemini/generateVideos', {
+        model: videoModel,
+        prompt,
+        config: { numberOfVideos: 1, resolution: '1080p', aspectRatio: '16:9', generateAudio: false },
+      }))
+    );
 
+    // Poll until done
     while (!operation.done) {
-      if (onProgress) onProgress('Generating video... this may take a few minutes.');
-      await new Promise(resolve => setTimeout(resolve, 10000));
-      operation = await withRetry(async () => {
-        const res = await fetch("/api/gemini/getVideosOperation", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ operation })
-        });
-        if (!res.ok) throw new Error(await res.text());
-        return res.json();
-      });
+      onProgress?.('Generating video with Veo 3... please wait.');
+      await new Promise(r => setTimeout(r, 10000));
+      operation = await withRetry(() =>
+        post('/api/gemini/getVideosOperation', { operation })
+      );
     }
 
-    const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-    if (!downloadLink) throw new Error('Failed to generate video');
+    const uri = operation.response?.generatedVideos?.[0]?.video?.uri;
+    if (!uri) throw new Error('Video generation completed but no video URI returned');
 
-    const response = await fetch(`/api/gemini/downloadVideo?uri=${encodeURIComponent(downloadLink)}`);
+    // Download to server, get server URL
+    onProgress?.('Downloading video...');
+    const data = await get(`/api/gemini/downloadVideo?uri=${encodeURIComponent(uri)}`);
+    return data.url as string;
 
-    if (!response.ok) throw new Error('Failed to download video');
-    
-    const blob = await response.blob();
-    return URL.createObjectURL(blob);
   } else {
-    const apiKey = getVideoGenKey();
-    if (!apiKey) throw new Error(`VideoGen API Key is missing. Please add it in the settings.`);
+    // VideoGen providers (Sora 2, Kling 3, Seedance 2) — all proxied through server
+    onProgress?.(`Submitting to ${provider} via VideoGen...`);
+    const { taskId } = await post('/api/videogen/generate', { prompt, provider });
 
-    if (onProgress) onProgress(`Connecting to ${provider} via VideoGen API...`);
-    
-    try {
-      const response = await fetch('https://videogenapi.com/api/v1/generate', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          prompt,
-          model: provider,
-          add_audio: true
-        })
-      });
+    // Poll with exponential backoff
+    let attempts = 0;
+    const maxAttempts = 120;
+    let delay = 5000;
 
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`VideoGen API Error: ${response.status} - ${errText}`);
+    while (attempts < maxAttempts) {
+      await new Promise(r => setTimeout(r, delay));
+      attempts++;
+      delay = Math.min(delay * 1.2, 15000); // gentle backoff, cap at 15s
+
+      const data = await get(`/api/videogen/status/${taskId}`);
+
+      if (data.status === 'completed' || data.status === 'succeeded') {
+        return data.url as string;
+      } else if (data.status === 'failed' || data.status === 'error') {
+        throw new Error(data.error || data.message || `${provider} video generation failed`);
       }
 
-      const data = await response.json();
-      const taskId = data.generation_id || data.id || data.task_id;
-
-      if (!taskId) throw new Error('No task ID returned from VideoGen API');
-
-      let attempts = 0;
-      const maxAttempts = 120; // 10 minutes max (120 * 5s)
-
-      // Poll for completion
-      while (attempts < maxAttempts) {
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        attempts++;
-        
-        const statusRes = await fetch(`https://videogenapi.com/api/v1/status/${taskId}`, {
-          headers: { 'Authorization': `Bearer ${apiKey}` }
-        });
-
-        if (!statusRes.ok) throw new Error('Failed to check video status');
-        const statusData = await statusRes.json();
-
-        if (statusData.status === 'completed' || statusData.status === 'succeeded') {
-          return statusData.video_url || statusData.url || statusData.output;
-        } else if (statusData.status === 'failed' || statusData.status === 'error') {
-          throw new Error(statusData.error || statusData.message || 'Video generation failed');
-        }
-        
-        if (onProgress) {
-          const progressMsg = statusData.message ? ` - ${statusData.message}` : '';
-          onProgress(`Generating with ${provider}... status: ${statusData.status || 'processing'}${progressMsg}`);
-        }
-      }
-      
-      throw new Error(`Video generation timed out after 10 minutes. Task ID: ${taskId}. You can check the status later.`);
-    } catch (error: any) {
-      console.error("VideoGen API Error:", error);
-      throw new Error(`Failed to generate with ${provider}: ${error.message}. Ensure the VideoGen API endpoint is correct and active.`);
+      const progressMsg = data.message ? ` — ${data.message}` : '';
+      onProgress?.(`${provider} status: ${data.status || 'processing'}${progressMsg}`);
     }
+
+    throw new Error(`Video generation timed out after ${Math.round(maxAttempts * 10 / 60)} minutes (task: ${taskId})`);
   }
+};
+
+// ── ElevenLabs TTS ────────────────────────────────────────────────────────────
+export const generateSpeech = async (
+  text: string,
+  voiceId?: string,
+  lang?: string
+): Promise<string> => {
+  const data = await post('/api/elevenlabs/tts', { text, voiceId, lang });
+  return data.url as string;
+};
+
+// ── Sync.Labs — Lip-sync ──────────────────────────────────────────────────────
+export const startLipsync = async (videoUrl: string, audioUrl: string): Promise<string> => {
+  const data = await post('/api/synclabs/lipsync', { videoUrl, audioUrl });
+  const jobId = data.id || data.jobId;
+  if (!jobId) throw new Error('Sync.Labs did not return a job ID');
+  return jobId as string;
+};
+
+export const pollLipsync = async (
+  jobId: string,
+  onProgress?: (status: string) => void
+): Promise<string> => {
+  let attempts = 0;
+  const maxAttempts = 120; // 10 min at 5s intervals
+
+  while (attempts < maxAttempts) {
+    await new Promise(r => setTimeout(r, 5000));
+    attempts++;
+
+    const data = await get(`/api/synclabs/status/${jobId}`);
+
+    if (data.status === 'completed') {
+      return data.url as string;
+    } else if (data.status === 'failed' || data.status === 'error') {
+      throw new Error(data.error || 'Lip-sync failed');
+    }
+
+    onProgress?.(`Lip-sync processing... ${data.status || 'pending'}`);
+  }
+
+  throw new Error('Lip-sync timed out after 10 minutes');
+};
+
+// ── FFmpeg — Stitch final film ─────────────────────────────────────────────────
+export const stitchFilm = async (
+  sceneUrls: string[],
+  onProgress?: (status: string) => void
+): Promise<string> => {
+  onProgress?.('Stitching scenes into final film...');
+  const data = await post('/api/stitch', { sceneUrls });
+  return data.url as string;
+};
+
+// ── ElevenLabs voices list ─────────────────────────────────────────────────────
+export const fetchVoices = async (): Promise<{ voice_id: string; name: string }[]> => {
+  const data = await get('/api/elevenlabs/voices');
+  return data.voices || [];
 };

@@ -1,8 +1,20 @@
+# Dependințe (nu le sincronizăm, se reinstalează la nevoie)
 node_modules/
-build/
 dist/
-coverage/
-.DS_Store
+build/
+
+# Fișiere de mediu și secrete (CRITIC: nu urca cheile API pe Git!)
+.env
+.env.local
 *.log
-.env*
-!.env.example
+
+# Fișiere specifice sistemului de operare sau editorului
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Foldere de cache pentru Python/AI (dacă este cazul)
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

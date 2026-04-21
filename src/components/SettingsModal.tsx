@@ -5,10 +5,10 @@ import { Language } from '../types';
 import { translations } from '../i18n';
 
 const TEXT_MODELS = [
-  { id: 'gemini-2.5-pro-preview-05-06', label: 'Gemini 2.5 Pro — cel mai capabil (💰💰💰)' },
-  { id: 'gemini-2.5-flash-preview-05-20', label: 'Gemini 2.5 Flash — rapid, calitate bună (💰💰)' },
-  { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash — recomandat, ieftin (💰)' },
-  { id: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash — buget minim (💰)' },
+  { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro — cel mai nou (💰💰💰)' },
+  { id: 'gemini-2.5-pro',         label: 'Gemini 2.5 Pro — capabil, stabil (💰💰💰)' },
+  { id: 'gemini-2.5-flash',       label: 'Gemini 2.5 Flash — recomandat, rapid (💰)' },
+  { id: 'gemini-2.0-flash-lite',  label: 'Gemini 2.0 Flash Lite — buget minim (💰)' },
 ];
 
 const VIDEO_MODELS = [
@@ -73,19 +73,28 @@ export function SettingsModal({ isOpen, onClose, lang }: Props) {
     setStatuses(prev => ({ ...prev, [providerId]: { configured: false, checking: true } }));
 
     try {
-      // Send key to server and check status
+      // Save key first (also updates process.env on server)
       await fetch('/api/config/set-key', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ service: providerId, key: key.trim() }),
       });
 
-      const statusRes = await fetch('/api/config/status');
-      const data = await statusRes.json();
+      // Real verification — lightweight API check (no generation call)
+      const verifyRes = await fetch('/api/config/verify-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service: providerId, key: key.trim() }),
+      });
+      const verifyData = await verifyRes.json().catch(() => ({ valid: false, error: `Server error ${verifyRes.status}` }));
 
       setStatuses(prev => ({
         ...prev,
-        [providerId]: { configured: data[providerId] ?? false, checking: false },
+        [providerId]: {
+          configured: verifyData.valid ?? false,
+          checking: false,
+          error: verifyData.valid ? undefined : (verifyData.error || 'Cheie invalidă'),
+        },
       }));
     } catch (err: any) {
       setStatuses(prev => ({
@@ -207,7 +216,7 @@ export function SettingsModal({ isOpen, onClose, lang }: Props) {
                     value={keys[provider.id] || ''}
                     onChange={(e) => {
                       setKeys(prev => ({ ...prev, [provider.id]: e.target.value }));
-                      setStatuses(prev => ({ ...prev, [provider.id]: { ...prev[provider.id], error: undefined } as KeyStatus }));
+                      setStatuses(prev => ({ ...prev, [provider.id]: { configured: false, checking: false, error: undefined } }));
                     }}
                     placeholder={status?.configured ? '••••••••••••• (already configured)' : `Enter ${provider.name} API Key...`}
                     className="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-2 text-sm text-zinc-200 focus:outline-none focus:border-indigo-500 transition-colors"

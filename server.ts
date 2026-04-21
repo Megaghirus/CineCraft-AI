@@ -81,16 +81,61 @@ async function startServer() {
     });
   });
 
+  const SERVICE_ENV: Record<string, string> = {
+    gemini:     "GEMINI_API_KEY",
+    elevenlabs: "ELEVENLABS_API_KEY",
+    synclabs:   "SYNCLABS_API_KEY",
+    videogen:   "VIDEOGEN_API_KEY",
+  };
+
   app.post("/api/config/set-key", (req, res) => {
     const { service, key } = req.body as { service: string; key: string };
     if (!service || !key) return res.status(400).json({ error: "service and key required" });
-    setConfig(`key_${service}`, key.trim());
+    const trimmed = key.trim();
+    setConfig(`key_${service}`, trimmed);
+    // Override in-memory env so new key is used immediately (without server restart)
+    if (SERVICE_ENV[service]) process.env[SERVICE_ENV[service]] = trimmed;
     res.json({ ok: true });
+  });
+
+  // Real key verification — lightweight checks, no generation calls
+  app.post("/api/config/verify-key", async (req, res) => {
+    const { service, key } = req.body as { service: string; key: string };
+    if (!service || !key) return res.status(400).json({ valid: false, error: "Missing params" });
+    try {
+      if (service === "gemini") {
+        // List models — free endpoint, doesn't consume generation quota
+        const r = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key.trim())}`
+        );
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          const msg = data?.error?.message || `HTTP ${r.status}`;
+          return res.json({ valid: false, error: msg });
+        }
+        return res.json({ valid: true });
+      } else if (service === "elevenlabs") {
+        const r = await fetch("https://api.elevenlabs.io/v1/user", {
+          headers: { "xi-api-key": key.trim() },
+        });
+        const data = await r.json().catch(() => ({}));
+        return res.json({ valid: r.ok, error: r.ok ? undefined : (data?.detail?.message || `HTTP ${r.status}`) });
+      } else if (service === "synclabs") {
+        const r = await fetch("https://api.synclabs.so/credits", {
+          headers: { "x-api-key": key.trim() },
+        });
+        return res.json({ valid: r.ok, error: r.ok ? undefined : `HTTP ${r.status}` });
+      } else {
+        return res.json({ valid: true });
+      }
+    } catch (err: any) {
+      res.json({ valid: false, error: err.message });
+    }
   });
 
   app.get("/api/config/models", (_req, res) => {
     res.json({
-      textModel:  getConfig("gemini_text_model")  || "gemini-2.0-flash",
+      textModel:  getConfig("gemini_text_model")  || "gemini-2.5-flash",
       videoModel: getConfig("gemini_video_model") || "veo-3.1-generate-preview",
     });
   });
@@ -129,7 +174,21 @@ async function startServer() {
 
       const ai = new GoogleGenAI({ apiKey });
       const { model, contents, config } = req.body;
-      const response = await ai.models.generateContent({ model, contents, config });
+      const requestedModel = model || "gemini-2.5-flash";
+
+      let response;
+      try {
+        response = await ai.models.generateContent({ model: requestedModel, contents, config });
+      } catch (modelErr: any) {
+        // If requested model not found, fall back to gemini-2.5-flash
+        if (modelErr?.status === 404 && requestedModel !== "gemini-2.5-flash") {
+          console.warn(`Model ${requestedModel} not found, falling back to gemini-2.5-flash`);
+          response = await ai.models.generateContent({ model: "gemini-2.5-flash", contents, config });
+        } else {
+          throw modelErr;
+        }
+      }
+
       res.json({ text: response.text });
     } catch (err: any) {
       console.error("Gemini generateContent error:", err);
@@ -192,20 +251,18 @@ async function startServer() {
       if (!apiKey) return res.status(400).json({ error: "VideoGen API key not configured. Add it in Settings." });
 
       const { prompt, provider } = req.body;
+      const model = provider || "kling-3";
       const response = await fetch("https://videogenapi.com/api/v1/generate", {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, model: provider, add_audio: false }),
+        body: JSON.stringify({ prompt, model, aspect_ratio: "16:9", duration: 5 }),
       });
 
-      if (!response.ok) {
-        const errText = await response.text();
-        return res.status(response.status).json({ error: `VideoGen: ${errText}` });
-      }
-
       const data = await response.json();
+      if (!response.ok) return res.status(response.status).json({ error: `VideoGen: ${data.error || data.message || response.status}` });
+
       const taskId = data.generation_id || data.id || data.task_id;
-      if (!taskId) return res.status(502).json({ error: "No task ID returned from VideoGen" });
+      if (!taskId) return res.status(502).json({ error: "No task ID returned from VideoGen", raw: data });
 
       res.json({ taskId });
     } catch (err: any) {
@@ -224,20 +281,34 @@ async function startServer() {
         headers: { Authorization: `Bearer ${apiKey}` },
       });
 
-      if (!statusRes.ok) return res.status(statusRes.status).json({ error: "VideoGen status check failed" });
-
-      const data = await statusRes.json();
-
-      // If completed, download video to server and return local URL
-      if (data.status === "completed" || data.status === "succeeded") {
-        const videoSrcUrl = data.video_url || data.url || data.output;
-        if (videoSrcUrl) {
-          const filename = await downloadToFile(videoSrcUrl, VIDEOS_DIR, "mp4");
-          return res.json({ status: "completed", url: `/api/media/videos/${filename}` });
-        }
+      if (!statusRes.ok) {
+        const data = await statusRes.json().catch(() => ({}));
+        return res.status(statusRes.status).json({ error: data.error || `VideoGen status error ${statusRes.status}` });
       }
 
-      res.json(data);
+      const data = await statusRes.json();
+      const status = data.status; // "in_progress" | "completed" | "failed"
+
+      if (status === "completed" || status === "done" || status === "succeeded") {
+        // Download binary video from /api/v1/video/{id}
+        const videoRes = await fetch(`https://videogenapi.com/api/v1/video/${taskId}`, {
+          headers: { Authorization: `Bearer ${apiKey}` },
+        });
+        if (!videoRes.ok) {
+          return res.json({ status: "in_progress", message: "Video ready but download pending..." });
+        }
+        const filename = `${crypto.randomUUID()}.mp4`;
+        const destPath = path.join(VIDEOS_DIR, filename);
+        const buf = await videoRes.arrayBuffer();
+        fs.writeFileSync(destPath, Buffer.from(buf));
+        return res.json({ status: "completed", url: `/api/media/videos/${filename}` });
+      }
+
+      if (status === "failed" || status === "error") {
+        return res.json({ status: "failed", error: data.message || "VideoGen generation failed" });
+      }
+
+      res.json({ status: "in_progress", message: data.message || "Generating..." });
     } catch (err: any) {
       console.error("VideoGen status error:", err);
       res.status(500).json({ error: err.message });

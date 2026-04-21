@@ -8,7 +8,16 @@
       "Bash(netstat -ano)",
       "Bash(taskkill /F /PID 39028)",
       "PowerShell(Stop-Process -Id 39028 -Force)",
-      "Bash(node_modules/.bin/vite build *)"
+      "Bash(node_modules/.bin/vite build *)",
+      "Bash(node -e \"const Database = require\\('better-sqlite3'\\); const db = new Database\\('cinecraft.db'\\); db.prepare\\(\\\\\"DELETE FROM config WHERE key IN \\('gemini_text_model','gemini_video_model'\\)\\\\\"\\).run\\(\\); const rows = db.prepare\\('SELECT * FROM config'\\).all\\(\\); console.log\\('Config table:', rows.map\\(r => r.key + '=' + r.value.substring\\(0,20\\)\\)\\);\")",
+      "Bash(node -e ' *)",
+      "Bash(curl -s -X POST http://localhost:3000/api/config/verify-key -H \"Content-Type: application/json\" -d \"{\\\\\"service\\\\\":\\\\\"gemini\\\\\",\\\\\"key\\\\\":\\\\\"test-invalid-key-123\\\\\"}\")",
+      "Bash(curl -s -X POST http://localhost:3000/api/config/set-key -H \"Content-Type: application/json\" -d \"{\\\\\"service\\\\\":\\\\\"gemini\\\\\",\\\\\"key\\\\\":\\\\\"TEST_KEY_ABC123\\\\\"}\")",
+      "Bash(node -e \"const db=require\\('better-sqlite3'\\)\\('cinecraft.db'\\); console.log\\(db.prepare\\('SELECT value FROM config WHERE key=?'\\).get\\('key_gemini'\\).value\\);\")",
+      "Bash(curl -s http://localhost:3000/api/config/status)",
+      "Bash(curl -s http://localhost:3000/api/config/models)",
+      "Bash(curl -s -X POST http://localhost:3000/api/gemini/generateContent -H \"Content-Type: application/json\" -d \"{\\\\\"model\\\\\":\\\\\"gemini-3.1-pro-preview\\\\\",\\\\\"contents\\\\\":\\\\\"Say OK\\\\\"}\")",
+      "Bash(curl -s -X POST http://localhost:3000/api/gemini/generateContent -H \"Content-Type: application/json\" -d \"{\\\\\"model\\\\\":\\\\\"gemini-3.1-pro-preview\\\\\",\\\\\"contents\\\\\":\\\\\"Return JSON: {\\\\\\\\\\\\\"scenes\\\\\\\\\\\\\":[{\\\\\\\\\\\\\"description\\\\\\\\\\\\\":\\\\\\\\\\\\\"test\\\\\\\\\\\\\"}]}\\\\\",\\\\\"config\\\\\":{\\\\\"responseMimeType\\\\\":\\\\\"application/json\\\\\"}}\")"
     ]
   }
 }

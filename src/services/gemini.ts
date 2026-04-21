@@ -11,10 +11,10 @@ async function fetchModels() {
     const res = await fetch('/api/config/models');
     if (!res.ok) throw new Error('fetch failed');
     const data = await res.json();
-    _textModel  = data.textModel  || 'gemini-2.0-flash';
+    _textModel  = data.textModel  || 'gemini-2.5-flash';
     _videoModel = data.videoModel || 'veo-3.1-generate-preview';
   } catch {
-    _textModel  = _textModel  || 'gemini-2.0-flash';
+    _textModel  = _textModel  || 'gemini-2.5-flash';
     _videoModel = _videoModel || 'veo-3.1-generate-preview';
   }
 }
@@ -163,7 +163,9 @@ export const generateScenes = async (story: string, actors: any[], lang: string,
     Language for description/dialogue: ${lang}
   `;
   const response = await generateContent(await getTextModel(), prompt, { responseMimeType: 'application/json' });
-  return safeParseJSON<{ scenes: any[] }>(response.text, { scenes: [] });
+  const parsed = safeParseJSON<{ scenes: any[] }>(response.text, { scenes: [] });
+  if (!parsed.scenes?.length) throw new Error('Gemini nu a returnat scene. Verifică cheia API și limita de cheltuieli.');
+  return parsed;
 };
 
 // ── Video prompt generation ────────────────────────────────────────────────────

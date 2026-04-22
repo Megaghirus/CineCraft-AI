@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { X, Key, Save, CheckCircle2, Loader2, AlertCircle, Cpu } from 'lucide-react';
 import { Language } from '../types';
 import { translations } from '../i18n';
+import { getAllLocalKeys, saveAllLocalKeys } from '../services/gemini';
 
 const TEXT_MODELS = [
   { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro — cel mai nou (💰💰💰)' },
@@ -43,19 +44,15 @@ export function SettingsModal({ isOpen, onClose, lang }: Props) {
   const [saved, setSaved]         = useState(false);
   const [models, setModels]       = useState({ textModel: 'gemini-2.0-flash', videoModel: 'veo-3.1-generate-preview' });
 
-  // Load current server-side key status and models on open
+  // Load key status from localStorage + models from server
   useEffect(() => {
     if (!isOpen) return;
-    fetch('/api/config/status')
-      .then(r => r.json())
-      .then((data: Record<string, boolean>) => {
-        const s: Record<string, KeyStatus> = {};
-        for (const [k, v] of Object.entries(data)) {
-          s[k] = { configured: v, checking: false };
-        }
-        setStatuses(s);
-      })
-      .catch(() => {});
+    const stored = getAllLocalKeys();
+    const s: Record<string, KeyStatus> = {};
+    for (const p of PROVIDERS) {
+      s[p.id] = { configured: !!stored[p.id], checking: false };
+    }
+    setStatuses(s);
     fetch('/api/config/models')
       .then(r => r.json())
       .then(data => setModels(data))
@@ -73,20 +70,18 @@ export function SettingsModal({ isOpen, onClose, lang }: Props) {
     setStatuses(prev => ({ ...prev, [providerId]: { configured: false, checking: true } }));
 
     try {
-      // Save key first (also updates process.env on server)
-      await fetch('/api/config/set-key', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ service: providerId, key: key.trim() }),
-      });
-
-      // Real verification — lightweight API check (no generation call)
       const verifyRes = await fetch('/api/config/verify-key', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ service: providerId, key: key.trim() }),
       });
       const verifyData = await verifyRes.json().catch(() => ({ valid: false, error: `Server error ${verifyRes.status}` }));
+
+      if (verifyData.valid) {
+        const stored = getAllLocalKeys();
+        stored[providerId] = key.trim();
+        saveAllLocalKeys(stored);
+      }
 
       setStatuses(prev => ({
         ...prev,
@@ -107,33 +102,31 @@ export function SettingsModal({ isOpen, onClose, lang }: Props) {
   const handleSaveAll = async () => {
     setSaving(true);
     try {
+      // Save keys to localStorage (client-side, per-user)
+      const stored = getAllLocalKeys();
       for (const [service, key] of Object.entries(keys)) {
-        if (key?.trim()) {
-          await fetch('/api/config/set-key', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ service, key: key.trim() }),
-          });
-        }
+        if (key?.trim()) stored[service] = key.trim();
       }
+      saveAllLocalKeys(stored);
+
+      // Save model selection to server (shared config, not secret)
       await fetch('/api/config/set-model', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(models),
       });
-      // Refresh statuses
-      const statusRes = await fetch('/api/config/status');
-      const data = await statusRes.json();
+
+      // Refresh statuses from localStorage
       const s: Record<string, KeyStatus> = {};
-      for (const [k, v] of Object.entries(data)) {
-        s[k] = { configured: v as boolean, checking: false };
+      for (const p of PROVIDERS) {
+        s[p.id] = { configured: !!stored[p.id], checking: false };
       }
       setStatuses(s);
       setKeys({});
       setSaved(true);
       setTimeout(() => { setSaved(false); onClose(); }, 800);
     } catch (err: any) {
-      alert(`Error saving keys: ${err.message}`);
+      alert(`Error saving: ${err.message}`);
     } finally {
       setSaving(false);
     }

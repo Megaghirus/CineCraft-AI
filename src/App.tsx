@@ -7,7 +7,7 @@ import { Languages, Film, Settings, Trash2 } from 'lucide-react';
 import { Logo } from './components/Logo';
 import { Manifesto } from './components/Manifesto';
 import { SettingsModal } from './components/SettingsModal';
-import { invalidateModelCache } from './services/gemini';
+import { invalidateModelCache, hasLocalKey } from './services/gemini';
 
 export default function App() {
   const [hasKey, setHasKey] = useState(false);
@@ -61,16 +61,8 @@ export default function App() {
 
   useEffect(() => {
     const init = async () => {
-      // Check server for API key configuration
-      try {
-        const res = await fetch('/api/config/status');
-        if (res.ok) {
-          const status = await res.json();
-          setHasKey(status.gemini);
-        }
-      } catch {
-        setHasKey(false);
-      }
+      // Check localStorage for API key (each user has their own key)
+      setHasKey(hasLocalKey('gemini'));
 
       await loadProjects();
 
@@ -155,8 +147,10 @@ export default function App() {
             )}
             <button
               onClick={() => {
-                if (window.confirm('Ești sigur că vrei să ștergi memoria cache? Proiectele rămân pe server.')) {
+                if (window.confirm('Ești sigur că vrei să ștergi memoria cache? Proiectele rămân pe server. API key-urile rămân salvate.')) {
+                  const keys = localStorage.getItem('cinecraft_keys');
                   localStorage.clear();
+                  if (keys) localStorage.setItem('cinecraft_keys', keys);
                   window.location.reload();
                 }
               }}
@@ -226,7 +220,7 @@ export default function App() {
         onClose={() => {
           setShowSettings(false);
           invalidateModelCache();
-          fetch('/api/config/status').then(r => r.json()).then(s => setHasKey(s.gemini)).catch(() => {});
+          setHasKey(hasLocalKey('gemini'));
         }}
         lang={lang}
       />

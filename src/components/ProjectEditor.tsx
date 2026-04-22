@@ -84,10 +84,17 @@ function StoryTab({ project, onChange, lang }: Props) {
   };
 
   const handleGenerateActors = async () => {
-    if (!project.story) return;
+    if (!project.story) {
+      alert('No story found. Please write or generate a story first.');
+      return;
+    }
     setGenActors(true);
     try {
       const data = await generateActors(project.story, lang, project.animationStyle, project.dialogueLanguage);
+      if (!data.actors?.length) {
+        alert('AI returned 0 actors. Try again or check your Gemini API key in Settings.');
+        return;
+      }
       const newActors: Actor[] = data.actors.map((a: any) => ({
         id: crypto.randomUUID(),
         name: a.name,
@@ -182,7 +189,7 @@ function StoryTab({ project, onChange, lang }: Props) {
           <div className="flex gap-2">
             <button
               onClick={handleGenerateActors}
-              disabled={genActors || !project.story}
+              disabled={genActors}
               className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-zinc-800 disabled:text-zinc-500 text-white px-3 py-1.5 rounded-lg transition-colors text-sm"
             >
               {genActors ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}

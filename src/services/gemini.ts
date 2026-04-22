@@ -2,6 +2,37 @@ import { VideoProvider } from '../types';
 
 const ANTHRO_CONSTRAINT = "CRITICAL: All characters (even animals, aliens, or objects) MUST be highly anthropomorphic. They must stand on two legs, have human-like posture, wear human clothing, and exhibit human behavior, gestures, and facial expressions.";
 
+// ── localStorage key storage (per-user, client-side) ──────────────────────────
+const LS_KEYS = 'cinecraft_keys';
+
+const getLocalKeys = (): Record<string, string> => {
+  try { return JSON.parse(localStorage.getItem(LS_KEYS) || '{}'); } catch { return {}; }
+};
+
+export const getLocalKey = (service: string): string => getLocalKeys()[service] || '';
+
+export const setLocalKey = (service: string, value: string) => {
+  const keys = getLocalKeys();
+  if (value) keys[service] = value; else delete keys[service];
+  localStorage.setItem(LS_KEYS, JSON.stringify(keys));
+};
+
+export const hasLocalKey = (service: string): boolean => !!getLocalKeys()[service];
+
+export const getAllLocalKeys = (): Record<string, string> => getLocalKeys();
+export const saveAllLocalKeys = (keys: Record<string, string>) =>
+  localStorage.setItem(LS_KEYS, JSON.stringify(keys));
+
+const buildHeaders = (extra: Record<string, string> = {}): Record<string, string> => {
+  const k = getLocalKeys();
+  const h: Record<string, string> = { ...extra };
+  if (k.gemini)     h['x-gemini-key']     = k.gemini;
+  if (k.elevenlabs) h['x-elevenlabs-key'] = k.elevenlabs;
+  if (k.synclabs)   h['x-synclabs-key']   = k.synclabs;
+  if (k.videogen)   h['x-videogen-key']   = k.videogen;
+  return h;
+};
+
 // ── Model cache (text model only — video model is per-scene) ──────────────────
 let _textModel: string | null = null;
 
@@ -60,7 +91,7 @@ const withRetry = async <T>(operation: () => Promise<T>, maxRetries = 5, baseDel
 const post = async (endpoint: string, body: unknown) => {
   const res = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: buildHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -71,7 +102,7 @@ const post = async (endpoint: string, body: unknown) => {
 };
 
 const get = async (endpoint: string) => {
-  const res = await fetch(endpoint);
+  const res = await fetch(endpoint, { headers: buildHeaders() });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
     throw new Error(err.error || `API Error: ${res.status}`);
@@ -98,16 +129,21 @@ function safeParseJSON<T>(text: string | null | undefined, fallback: T): T {
   }
 }
 
+// ── Language helpers ───────────────────────────────────────────────────────────
+const LANG_NAMES: Record<string, string> = { en: 'English', ro: 'Romanian', ru: 'Russian' };
+const storyLang = (lang: string, dialogueLanguage: string) =>
+  dialogueLanguage || LANG_NAMES[lang] || lang;
+
 // ── Story enhancement ──────────────────────────────────────────────────────────
 export const enhanceStory = async (story: string, lang: string, animationStyle = '', dialogueLanguage = '') => {
+  const outputLang = storyLang(lang, dialogueLanguage);
   const prompt = `
     Take the following rough story idea and expand it into a detailed, engaging, and well-structured narrative for a cartoon.
     Make it highly descriptive, focusing on character motivations, setting the scene, and a clear plot progression (beginning, middle, climax, end).
     ${animationStyle ? `The intended animation style is: ${animationStyle}. Keep this in mind for the atmosphere.` : ''}
-    ${dialogueLanguage ? `CRITICAL: The spoken dialogue and cultural context within the story should be in ${dialogueLanguage}.` : ''}
     ${ANTHRO_CONSTRAINT}
-    The output MUST be just the story text, written in the requested language.
-    Language: ${lang}
+    The output MUST be just the story text, written entirely in ${outputLang}. Do NOT use any other language.
+    Language: ${outputLang}
     Rough Idea: ${story}
   `;
   const response = await generateContent(await getTextModel(), prompt);
@@ -116,15 +152,16 @@ export const enhanceStory = async (story: string, lang: string, animationStyle =
 
 // ── Actors generation ─────────────────────────────────────────────────────────
 export const generateActors = async (story: string, lang: string, animationStyle = '', dialogueLanguage = '') => {
+  const outputLang = storyLang(lang, dialogueLanguage);
   const prompt = `
     Based on the following story, identify and generate a list of the main characters/actors.
     For each actor, provide a name and a detailed description including their role, appearance, and personality.
     ${animationStyle ? `Animation style: ${animationStyle}.` : ''}
-    ${dialogueLanguage ? `Characters should have names/traits appropriate for a story in ${dialogueLanguage}.` : ''}
+    Characters should have names/traits appropriate for a story in ${outputLang}.
     ${ANTHRO_CONSTRAINT}
     Output MUST be valid JSON: { "actors": [{ "name": "string", "description": "string" }] }
+    Write all text fields (name, description) in ${outputLang}.
     Story: ${story}
-    Language: ${lang}
   `;
   const response = await generateContent(await getTextModel(), prompt, { responseMimeType: 'application/json' });
   return safeParseJSON<{ actors: any[] }>(response.text, { actors: [] });
@@ -132,11 +169,12 @@ export const generateActors = async (story: string, lang: string, animationStyle
 
 // ── Scene generation ───────────────────────────────────────────────────────────
 export const generateScenes = async (story: string, actors: any[], lang: string, animationStyle = '', dialogueLanguage = '') => {
+  const outputLang = storyLang(lang, dialogueLanguage);
   const prompt = `
     Based on the following story and actors, break the story into a sequence of scenes.
     For each scene provide:
-    1. description: the visual action (no dialogue).
-    2. dialogue: ALL spoken lines, strictly in ${dialogueLanguage || `the language for code '${lang}'`}. Do not mix languages.
+    1. description: the visual action (no dialogue), written in ${outputLang}.
+    2. dialogue: ALL spoken lines, strictly in ${outputLang}. Do not mix languages.
     3. prompt: a detailed English visual prompt for a video AI.
 
     PROMPT RULES:
@@ -151,7 +189,7 @@ export const generateScenes = async (story: string, actors: any[], lang: string,
     Output MUST be valid JSON: { "scenes": [{ "description": "string", "dialogue": "string", "prompt": "string" }] }
     Story: ${story}
     Actors: ${JSON.stringify(actors)}
-    Language for description/dialogue: ${lang}
+    Language for description/dialogue: ${outputLang}
   `;
   const response = await generateContent(await getTextModel(), prompt, { responseMimeType: 'application/json' });
   const parsed = safeParseJSON<{ scenes: any[] }>(response.text, { scenes: [] });

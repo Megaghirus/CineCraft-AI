@@ -42,15 +42,25 @@ const getConfig  = (key: string): string | null =>
 const setConfig  = (key: string, value: string) =>
   db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)").run(key, value);
 
-// env var takes priority over DB-stored key
-const getApiKey  = (service: string): string | null => {
+// Header from browser takes priority, then env var, then DB-stored key
+const getApiKey = (service: string, req?: express.Request): string | null => {
+  const headerMap: Record<string, string> = {
+    gemini:     'x-gemini-key',
+    elevenlabs: 'x-elevenlabs-key',
+    synclabs:   'x-synclabs-key',
+    videogen:   'x-videogen-key',
+  };
+  if (req) {
+    const fromHeader = req.headers[headerMap[service]] as string | undefined;
+    if (fromHeader?.trim()) return fromHeader.trim();
+  }
   const envMap: Record<string, string> = {
     gemini:     "GEMINI_API_KEY",
     elevenlabs: "ELEVENLABS_API_KEY",
     synclabs:   "SYNCLABS_API_KEY",
     videogen:   "VIDEOGEN_API_KEY",
   };
-  return process.env[envMap[service]] || getConfig(`key_${service}`);
+  return process.env[envMap[service]] || getConfig(`key_${service}`) || null;
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -75,12 +85,12 @@ async function startServer() {
   app.use("/api/media", express.static(TEMP_DIR));
 
   // ── Config ──────────────────────────────────────────────────────────────────
-  app.get("/api/config/status", (_req, res) => {
+  app.get("/api/config/status", (req, res) => {
     res.json({
-      gemini:     !!getApiKey("gemini"),
-      elevenlabs: !!getApiKey("elevenlabs"),
-      synclabs:   !!getApiKey("synclabs"),
-      videogen:   !!getApiKey("videogen"),
+      gemini:     !!getApiKey("gemini",     req),
+      elevenlabs: !!getApiKey("elevenlabs", req),
+      synclabs:   !!getApiKey("synclabs",   req),
+      videogen:   !!getApiKey("videogen",   req),
     });
   });
 
@@ -172,7 +182,7 @@ async function startServer() {
   // ── Gemini — text generation ────────────────────────────────────────────────
   app.post("/api/gemini/generateContent", async (req, res) => {
     try {
-      const apiKey = getApiKey("gemini");
+      const apiKey = getApiKey("gemini", req);
       if (!apiKey) return res.status(400).json({ error: "Gemini API key not configured. Add it in Settings." });
 
       const ai = new GoogleGenAI({ apiKey });
@@ -202,7 +212,7 @@ async function startServer() {
   // ── Gemini — video generation ───────────────────────────────────────────────
   app.post("/api/gemini/generateVideos", async (req, res) => {
     try {
-      const apiKey = getApiKey("gemini");
+      const apiKey = getApiKey("gemini", req);
       if (!apiKey) return res.status(400).json({ error: "Gemini API key not configured." });
 
       const ai = new GoogleGenAI({ apiKey });
@@ -217,7 +227,7 @@ async function startServer() {
 
   app.post("/api/gemini/getVideosOperation", async (req, res) => {
     try {
-      const apiKey = getApiKey("gemini");
+      const apiKey = getApiKey("gemini", req);
       if (!apiKey) return res.status(400).json({ error: "Gemini API key not configured." });
 
       const ai = new GoogleGenAI({ apiKey });
@@ -233,7 +243,7 @@ async function startServer() {
   // Download Gemini video → save to disk → return server URL
   app.get("/api/gemini/downloadVideo", async (req, res) => {
     try {
-      const apiKey = getApiKey("gemini");
+      const apiKey = getApiKey("gemini", req);
       if (!apiKey) return res.status(400).json({ error: "Gemini API key not configured." });
 
       const uri = req.query.uri as string;
@@ -250,7 +260,7 @@ async function startServer() {
   // ── VideoGen — proxy for Sora 2, Kling 3, Seedance 2 ──────────────────────
   app.post("/api/videogen/generate", async (req, res) => {
     try {
-      const apiKey = getApiKey("videogen");
+      const apiKey = getApiKey("videogen", req);
       if (!apiKey) return res.status(400).json({ error: "VideoGen API key not configured. Add it in Settings." });
 
       const { prompt, provider } = req.body;
@@ -262,7 +272,10 @@ async function startServer() {
       });
 
       const data = await response.json();
-      if (!response.ok) return res.status(response.status).json({ error: `VideoGen: ${data.error || data.message || response.status}` });
+      if (!response.ok) {
+        console.error("VideoGen API error:", response.status, JSON.stringify(data));
+        return res.status(response.status).json({ error: `VideoGen: ${data.error || data.message || data.detail || JSON.stringify(data)}` });
+      }
 
       const taskId = data.generation_id || data.id || data.task_id;
       if (!taskId) return res.status(502).json({ error: "No task ID returned from VideoGen", raw: data });
@@ -276,7 +289,7 @@ async function startServer() {
 
   app.get("/api/videogen/status/:taskId", async (req, res) => {
     try {
-      const apiKey = getApiKey("videogen");
+      const apiKey = getApiKey("videogen", req);
       if (!apiKey) return res.status(400).json({ error: "VideoGen API key not configured." });
 
       const { taskId } = req.params;
@@ -321,7 +334,7 @@ async function startServer() {
   // ── ElevenLabs — TTS ────────────────────────────────────────────────────────
   app.post("/api/elevenlabs/tts", async (req, res) => {
     try {
-      const apiKey = getApiKey("elevenlabs");
+      const apiKey = getApiKey("elevenlabs", req);
       if (!apiKey) return res.status(400).json({ error: "ElevenLabs API key not configured. Add it in Settings." });
 
       const { text, voiceId, lang } = req.body as { text: string; voiceId?: string; lang?: string };
@@ -357,9 +370,9 @@ async function startServer() {
   });
 
   // Get available ElevenLabs voices
-  app.get("/api/elevenlabs/voices", async (_req, res) => {
+  app.get("/api/elevenlabs/voices", async (req, res) => {
     try {
-      const apiKey = getApiKey("elevenlabs");
+      const apiKey = getApiKey("elevenlabs", req);
       if (!apiKey) return res.json({ voices: [] });
 
       const voicesRes = await fetch("https://api.elevenlabs.io/v1/voices", {
@@ -375,7 +388,7 @@ async function startServer() {
   // ── Sync.Labs — Lip-sync ────────────────────────────────────────────────────
   app.post("/api/synclabs/lipsync", async (req, res) => {
     try {
-      const apiKey = getApiKey("synclabs");
+      const apiKey = getApiKey("synclabs", req);
       if (!apiKey) return res.status(400).json({ error: "Sync.Labs API key not configured. Add it in Settings." });
 
       const { videoUrl, audioUrl } = req.body as { videoUrl: string; audioUrl: string };
@@ -405,7 +418,7 @@ async function startServer() {
 
   app.get("/api/synclabs/status/:jobId", async (req, res) => {
     try {
-      const apiKey = getApiKey("synclabs");
+      const apiKey = getApiKey("synclabs", req);
       if (!apiKey) return res.status(400).json({ error: "Sync.Labs API key not configured." });
 
       const statusRes = await fetch(`https://api.synclabs.so/lipsync/${req.params.jobId}`, {
